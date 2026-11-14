@@ -1,0 +1,35 @@
+name: Runner network probe
+
+# Started by a push to this branch; later attempts by "Re-run all jobs".
+on:
+  push:
+    branches:
+      - bench/runner-network
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [0, 1, 2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install requests
+        run: python -m pip install requests==2.32.3
+      - name: Measure
+        run: |
+          python -I measure.py ${{ matrix.job }} ${{ github.run_attempt }} \
+            | tee results-${{ github.run_attempt }}-${{ matrix.job }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ github.run_attempt }}-${{ matrix.job }}
+          path: results-*.jsonl
