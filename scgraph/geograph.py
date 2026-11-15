@@ -1233,6 +1233,7 @@ class GeoGraphIO:
                 "us_freeway",
                 "world_main_roads",
                 "world_main_roads_and_marnet",
+                "world_multimodal",
             ]
             | types.ModuleType
         ),
@@ -3588,6 +3589,255 @@ class GeoGraph(
                 stacklevel=2,
             )
         return output_matrix
+
+    def get_pareto_shortest_paths(
+        self,
+        origin_node: dict[str, float],
+        destination_node: dict[str, float],
+        lambdas: Sequence[float] | None = None,
+        modal_parameters: dict[str, dict[str, float]] | None = None,
+        output_units: str = "km",
+        output_coordinate_path: str = "list_of_lists",
+        output_path: bool = False,
+        **kwargs,
+    ) -> list[dict]:
+        """Compute the Pareto frontier (Duration vs CO2) between two locations.
+
+        Sweeps the carbon weighting factor lambda across:
+            Cost_lambda(e) = Time(e) + lambda * CO2(e)
+        to identify the sequence of non-dominated Pareto-optimal paths and modal
+        transitions.
+
+        Parameters:
+            origin_node: Mapping with 'latitude' and 'longitude'.
+            destination_node: Mapping with 'latitude' and 'longitude'.
+            lambdas: Sequence of float weights (hours per kg CO2e). Defaults
+                to a spectrum from 0.0 (pure time) to 100.0 (carbon penalty).
+            modal_parameters: Optional custom parameters per mode (speed,
+                co2_per_km, fixed_time, fixed_co2). Defaults to GLEC values.
+            output_units: Output units for distance (default: 'km').
+            output_coordinate_path: Format for coordinate paths ('list_of_lists',
+                'list_of_dicts', or None).
+            output_path: If True, include node ids in 'path'.
+
+        Returns:
+            list[dict]: List of distinct Pareto-optimal routes.
+        """
+        if lambdas is None:
+            lambdas = (
+                0.0,
+                0.0001,
+                0.001,
+                0.005,
+                0.01,
+                0.02,
+                0.05,
+                0.1,
+                0.2,
+                0.5,
+                1.0,
+                2.0,
+                5.0,
+                10.0,
+                25.0,
+                50.0,
+                100.0,
+            )
+
+        defaults = {
+            "road": {
+                "speed": 80.0,
+                "co2_per_km": 75.0,
+                "fixed_time": 0.0,
+                "fixed_co2": 0.0,
+            },
+            "rail": {
+                "speed": 70.0,
+                "co2_per_km": 22.0,
+                "fixed_time": 0.0,
+                "fixed_co2": 0.0,
+            },
+            "sea": {
+                "speed": 30.0,
+                "co2_per_km": 11.0,
+                "fixed_time": 0.0,
+                "fixed_co2": 0.0,
+            },
+            "air": {
+                "speed": 800.0,
+                "co2_per_km": 600.0,
+                "fixed_time": 0.75,
+                "fixed_co2": 1500.0,
+            },
+            "hub": {
+                "speed": 1.0,
+                "co2_per_km": 0.0,
+                "fixed_time": 2.0,
+                "fixed_co2": 500.0,
+            },
+            "port": {
+                "speed": 1.0,
+                "co2_per_km": 0.0,
+                "fixed_time": 4.0,
+                "fixed_co2": 800.0,
+            },
+            "airport": {
+                "speed": 1.0,
+                "co2_per_km": 0.0,
+                "fixed_time": 2.0,
+                "fixed_co2": 1200.0,
+            },
+        }
+        params = {**defaults, **(modal_parameters or {})}
+
+        # Snap origin and destination
+        origin = [origin_node.get("latitude"), origin_node.get("longitude")]
+        dest = [
+            destination_node.get("latitude"),
+            destination_node.get("longitude"),
+        ]
+        node_addition_circuity = kwargs.get("node_addition_circuity", 4.0)
+        node_addition_type = kwargs.get("node_addition_type", "kdclosest")
+        dest_addition_type = kwargs.get(
+            "destination_node_addition_type", "kdclosest"
+        )
+        lat_lon_bound = kwargs.get("node_addition_lat_lon_bound", "auto")
+        auto_bound_max = kwargs.get("auto_lat_lon_bound_max", 2.0)
+
+        if lat_lon_bound == "auto":
+            lat_lon_bound = min(
+                get_lat_lon_bound_between_pts(origin_node, destination_node)
+                * 1.01,
+                auto_bound_max,
+            )
+
+        origin_snap = self.__snap_node__(
+            node=origin,
+            circuity=node_addition_circuity,
+            node_addition_type=node_addition_type,
+            lat_lon_bound=lat_lon_bound,
+        )
+        dest_snap = self.__snap_node__(
+            node=dest,
+            circuity=node_addition_circuity,
+            node_addition_type=dest_addition_type,
+            lat_lon_bound=lat_lon_bound,
+        )
+
+        # Mode names lookup
+        mode_names = [m.get("name") or "road" for m in self.modes]
+        node_modes = getattr(self, "node_modes", None)
+
+        def get_edge_mode(u: int, v: int) -> str:
+            if not node_modes or u >= len(node_modes) or v >= len(node_modes):
+                return "road"
+            mu, mv = node_modes[u], node_modes[v]
+            if mu == mv:
+                name = mode_names[mu] if mu < len(mode_names) else "road"
+                return name or "road"
+            name_u = mode_names[mu] if mu < len(mode_names) else "hub"
+            name_v = mode_names[mv] if mv < len(mode_names) else "hub"
+            if name_u in ("port", "airport", "hub"):
+                return name_u
+            if name_v in ("port", "airport", "hub"):
+                return name_v
+            return "hub"
+
+        # Precompute edge durations and carbon emissions
+        base_graph = self.graph_object.graph
+        edge_data = {}  # (u, v) -> (t, c, km, mode)
+        for u, row in enumerate(base_graph):
+            for v, km in row.items():
+                m = get_edge_mode(u, v)
+                p = params.get(m, params["road"])
+                dur = (km / p["speed"]) + p.get("fixed_time", 0.0)
+                co2 = (
+                    km * p.get("co2_per_km", 0.0) + p.get("fixed_co2", 0.0)
+                ) / 1000.0
+                edge_data[(u, v)] = (dur, co2, km, m)
+
+        from scgraph import Graph
+
+        results = []
+        seen_paths = set()
+
+        for lam in lambdas:
+            adj = [{} for _ in range(len(base_graph))]
+            for (u, v), (t, c, _, _) in edge_data.items():
+                adj[u][v] = t + lam * c
+
+            g = Graph(adj)
+            try:
+                res = g.dijkstra(origin_snap, dest_snap)
+            except PathNotFoundError:
+                continue
+
+            path = res.get("path", [])
+            path_tuple = tuple(path)
+            if not path or path_tuple in seen_paths:
+                continue
+            seen_paths.add(path_tuple)
+
+            total_t = 0.0
+            total_c = 0.0
+            total_km = 0.0
+            modes_sequence = []
+            breakdown = {}
+
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i + 1]
+                t, c, km, m = edge_data.get((u, v), (0.0, 0.0, 0.0, "road"))
+                total_t += t
+                total_c += c
+                total_km += km
+                if not modes_sequence or modes_sequence[-1] != m:
+                    modes_sequence.append(m)
+
+                if m not in breakdown:
+                    breakdown[m] = {
+                        "distance": 0.0,
+                        "duration": 0.0,
+                        "co2": 0.0,
+                    }
+                breakdown[m]["distance"] += km
+                breakdown[m]["duration"] += t
+                breakdown[m]["co2"] += c
+
+            # Format coordinates
+            coord_pts = [self.nodes[nid] for nid in path]
+            if output_coordinate_path == "list_of_dicts":
+                coord_path = [
+                    {"latitude": pt[0], "longitude": pt[1]} for pt in coord_pts
+                ]
+            elif output_coordinate_path == "list_of_lists":
+                coord_path = coord_pts
+            else:
+                coord_path = None
+
+            dist_mult = distance_converter(1, "km", output_units)
+            route_info = {
+                "lambda": lam,
+                "duration_hours": round(total_t, 2),
+                "duration_days": round(total_t / 24.0, 2),
+                "co2_kg": round(total_c, 2),
+                "length": round(total_km * dist_mult, 3),
+                "modes": modes_sequence,
+                "modal_breakdown": {
+                    k: {
+                        "distance": round(v["distance"] * dist_mult, 2),
+                        "duration_hours": round(v["duration"], 2),
+                        "co2_kg": round(v["co2"], 2),
+                    }
+                    for k, v in breakdown.items()
+                },
+                "coordinate_path": coord_path,
+            }
+            if output_path:
+                route_info["path"] = path
+            results.append(route_info)
+
+        results.sort(key=lambda r: r["duration_hours"])
+        return results
 
 
 class LazyGeoGraph(GeoGraph):

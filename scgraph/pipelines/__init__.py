@@ -125,6 +125,7 @@ NAMES = (
     "us_freeway",
     "world_main_roads",
     "world_main_roads_and_marnet",
+    "world_multimodal",
 )
 LARGE_DOWNLOAD = (
     100e6  # bytes; announced with a warning, visible without logging set up
