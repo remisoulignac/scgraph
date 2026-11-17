@@ -1,0 +1,102 @@
+name: Build the networks
+
+# Builds and validates every network of `GeoGraph.list_buildable_geographs()` on standard
+# runners (4 CPUs, 16 GB of memory), one job per network. A pipeline that needs a region
+# is built for the regions of its validation cases. A push to this branch, or a manual
+# run, starts the builds. The networks and the logs are kept as artifacts.
+on:
+  push:
+    branches:
+      - build/world-multimodal
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.network }} ${{ matrix.region }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - network: marnet
+          - network: oak_ridge_maritime
+          - network: eurostat_marnet
+          - network: north_america_rail
+          - network: us_freeway
+          - network: europe_freeway
+          - network: europe_rail
+          - network: world_main_roads
+          - network: world_main_roads_and_marnet
+          - network: world_multimodal
+          - {network: osm_main_roads, region: europe/france}
+          - {network: osm_main_roads, region: europe/luxembourg}
+          - {network: osm_rail, region: europe/luxembourg}
+          - {network: osm_main_roads_and_marnet, region: europe/denmark}
+          - {network: osm_multimodal, region: europe/denmark}
+    env:
+      SCGRAPH_REQUIRE_CPP: "1"
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      REGION: ${{ matrix.region }}
+    steps:
+      # An artifact name may not hold a slash
+      - name: Name the artifacts
+        run: echo "ARTIFACT=${{ matrix.network }}${REGION:+-${REGION//\//-}}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      # The same planet file (same size and ETag) on the us-west-2 mirror, which a
+      # runner reads faster than the eu-central-1 mirror of the code.
+      - name: Read the planet from the us-west-2 mirror
+        run: |
+          sed -i 's/osm-planet-eu-central-1\.s3\.dualstack\.eu-central-1/osm-planet-us-west-2.s3.dualstack.us-west-2/' \
+            scgraph/pipelines/steps/stage1_extract/osm.py
+          grep -n 'us-west-2' scgraph/pipelines/steps/stage1_extract/osm.py
+      - name: Install scgraph with the C++ extension and osmium
+        run: |
+          uv sync --extra osm
+          uv run python -c "from scgraph.utils import has_cpp; assert has_cpp()"
+      - name: Build and validate
+        run: |
+          mkdir -p out
+          uv run python - ${{ matrix.network }} ${REGION:+--region "$REGION"} \
+            --cache-dir out/cache --work-dir out/work --validate \
+            > out/build.log 2>&1 <<'PY' || status=$?
+          import logging, sys
+          class Steps(logging.Formatter):
+              def format(self, record):
+                  text = super().format(record)
+                  return text + (f" {record.scgraph}" if hasattr(record, "scgraph") else "")
+          handler = logging.StreamHandler()
+          handler.setFormatter(Steps("%(asctime)s %(name)s %(message)s"))
+          logging.basicConfig(level=logging.DEBUG, handlers=[handler])
+          logging.getLogger("urllib3").setLevel(logging.WARNING)
+          from scgraph.pipelines.build import main
+          main(sys.argv[1:])
+          PY
+          grep -v ' of .* GB read\|find the shortest path\|snap the' out/build.log | tail -60
+          exit ${status:-0}
+      - name: Free memory and disk at the end
+        if: always()
+        run: |
+          free -m
+          df -h /
+          find out -name "*.scgraph" -exec ls -la {} + || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: log-${{ env.ARTIFACT }}
+          path: out/build.log
+      # A network that fails validation stays in the work folder: kept to study it. The
+      # network of us_freeway is not uploaded: whether its Esri licence allows sharing is
+      # not checked.
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.network != 'us_freeway'
+        with:
+          name: network-${{ env.ARTIFACT }}
+          path: out/**/*.scgraph
+          retention-days: 14
