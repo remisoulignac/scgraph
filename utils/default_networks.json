@@ -1,0 +1,7 @@
+{
+ "tag": "networks-2026.11.18-dev.3",
+ "files": {
+  "marnet.scgraph": "7deb4cd529ec70eeeb82c38c0af95f00c4d3096b3f1b8bca5a2d652dd6130947",
+  "osm_main_roads-europe-luxembourg.scgraph": "9f8faf20bc19e3b5d93da120866daef4ffa9d6cfa01a8d825f5c68a372821c5c"
+ }
+}
