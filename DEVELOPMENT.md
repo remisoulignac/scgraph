@@ -62,10 +62,10 @@ utils/
   compare_versions.py            # Before/after of two git refs with bench.py
   prettify.py                    # ruff (unused imports) + black (line-length=80)
   docs.py                        # Generate pdoc HTML docs — DO NOT RUN (release only)
+  assemble_networks.py           # Files, index and notes of a data release (.github/workflows/build_networks.yml)
 noxfile.py                       # nox sessions: pytest across Python 3.11–3.14, and lint (ruff, pyrefly)
 pyproject.toml                   # Package metadata, scikit-build-core config, black + ruff + pytest config
 CMakeLists.txt                   # C++ build configuration (nanobind, C++20, -O3)
-publish.sh                       # PyPI publishing script — DO NOT RUN
 ```
 
 ## Development Commands
