@@ -1,0 +1,88 @@
+name: Build the reference networks
+
+# A pushed tag `networks-...` starts a data release. Each job builds and validates one
+# network. The last job creates the release as a draft, which a maintainer reviews and
+# publishes.
+on:
+  push:
+    tags:
+      - "networks-*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.network }} ${{ matrix.region }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - network: marnet
+          - {network: osm_main_roads, region: europe/luxembourg}
+    env:
+      SCGRAPH_REQUIRE_CPP: "1"
+      REGION: ${{ matrix.region }}
+    steps:
+      # The name of a release file may not hold a slash
+      - name: Name the file
+        run: echo "FILE=${{ matrix.network }}${REGION:+-${REGION//\//-}}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install scgraph with the C++ extension and osmium
+        run: uv sync --extra osm
+      - name: Build and validate
+        run: |
+          uv run python -m scgraph.pipelines.build ${{ matrix.network }} \
+            ${REGION:+--region "$REGION"} --cache-dir cache --validate
+          mkdir built
+          cp cache/networks/${{ matrix.network }}/${REGION:+$REGION/}*.scgraph "built/$FILE.scgraph"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: network-${{ env.FILE }}
+          path: built/*.scgraph
+          retention-days: 14
+
+  assemble:
+    name: Create the draft release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      # The files of a published release never change
+      - name: Stop if the release is published
+        run: |
+          state=$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null || true)
+          if [ "$state" = "false" ]; then echo "$TAG is published"; exit 1; fi
+          if [ "$state" = "true" ]; then gh release delete "$TAG" --yes; fi
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: network-*
+          path: built
+          merge-multiple: true
+      - name: Download the previous data release
+        run: |
+          previous=$(gh release list --limit 100 --json tagName,isDraft,publishedAt \
+            -q '[.[] | select(.tagName | startswith("networks-")) | select(.isDraft | not)]
+                | sort_by(.publishedAt) | last | .tagName // ""')
+          echo "previous release: ${previous:-none}"
+          mkdir previous
+          if [ -n "$previous" ]; then gh release download "$previous" --dir previous; fi
+      - name: Assemble the release
+        run: python utils/assemble_networks.py built previous release "$TAG" "$GITHUB_SHA"
+      - name: Create the draft
+        run: |
+          case "$TAG" in *-dev.*) kind=--prerelease ;; *) kind= ;; esac
+          gh release create "$TAG" --verify-tag --draft --latest=false $kind \
+            --title "$TAG" --notes-file release/notes.md release/*.scgraph release/networks.json
+          cat release/notes.md >> "$GITHUB_STEP_SUMMARY"

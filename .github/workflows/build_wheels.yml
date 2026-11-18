@@ -28,6 +28,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      # A library release names one published data release, with the digests of its files
+      - name: Check the default data release
+        run: python3 utils/default_networks.py check
+
       - name: Check version status
         id: version_check
         env:
@@ -70,6 +74,7 @@ jobs:
 
   build_wheels:
     name: Build wheels on ${{ matrix.os }} (${{ matrix.cibw_archs }})
+    needs: check_version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -124,6 +129,7 @@ jobs:
 
   build_sdist:
     name: Build source distribution (sdist)
+    needs: check_version
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
