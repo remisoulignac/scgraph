@@ -17,7 +17,7 @@ from collections.abc import Callable
 from scgraph.pipelines.steps.stage1_extract import osm
 from scgraph.pipelines.steps.stage3_assembly import assembly
 
-PIPELINE_VERSION = 1
+PIPELINE_VERSION = 2
 
 SOURCES = {"roads": osm.GEOFABRIK}
 SELECTS = {
