@@ -188,19 +188,39 @@ def test_tag_keys_name_the_keys_of_the_ways_that_reach_select(osm_file):
     assert (60, 61) in arcs
 
 
-# A pipeline gives several selects to `locate_ways`, one for each kind of
-# way: roads and ferries, for example. `load_from_osm` takes one select, so
-# the two tests below call `locate_ways`.
+# A pipeline gives its selects to `locate_ways` by mode, then by kind of way:
+# the roads and the ferries of the mode "road", for example. `load_from_osm`
+# takes one select, so the four tests below call `locate_ways`.
 def test_a_way_goes_to_the_first_select_that_keeps_it(osm_file):
     def select_primary_roads(tags):
         return 0 if tags.get("highway") == "primary" else None
 
     # Both selects keep the primary roads, and "roads" comes first.
-    selects = {"roads": osm.select_main_roads, "primary": select_primary_roads}
+    selects = {
+        "road": {
+            "roads": osm.select_main_roads,
+            "primary": select_primary_roads,
+        }
+    }
 
     _, polylines = osm.locate_ways(osm_file, selects, ("highway",))
 
-    assert {kind for kind, _, _ in polylines} == {"roads"}
+    assert {kind for _, kind, _, _ in polylines} == {"roads"}
+
+
+def test_a_way_that_two_modes_keep_goes_to_each_of_them(osm_file):
+    def select_primary_roads(tags):
+        return 0 if tags.get("highway") == "primary" else None
+
+    # Both modes keep the primary roads.
+    selects = {
+        "road": {"roads": osm.select_main_roads},
+        "primary": {"primary": select_primary_roads},
+    }
+
+    _, polylines = osm.locate_ways(osm_file, selects, ("highway",))
+
+    assert {mode for mode, _, _, _ in polylines} == {"road", "primary"}
 
 
 def test_ways_of_two_kinds_meet_at_a_node_that_both_have(osm_file):
@@ -208,16 +228,35 @@ def test_ways_of_two_kinds_meet_at_a_node_that_both_have(osm_file):
         return 0 if tags.get("highway") == "residential" else None
 
     selects = {
-        "streets": select_residential_streets,
-        "roads": osm.select_main_roads,
+        "road": {
+            "streets": select_residential_streets,
+            "roads": osm.select_main_roads,
+        }
     }
 
     junctions, _ = osm.locate_ways(osm_file, selects, ("highway",))
 
     # Node 3 is the end of the main road 1 and of the residential street 4.
     # Node 1 is the end of the main road 1 only.
-    assert 3 in junctions
-    assert 1 not in junctions
+    assert 3 in junctions["road"]
+    assert 1 not in junctions["road"]
+
+
+def test_ways_of_two_modes_do_not_meet_at_a_node_that_both_have(osm_file):
+    def select_residential_streets(tags):
+        return 0 if tags.get("highway") == "residential" else None
+
+    selects = {
+        "street": {"streets": select_residential_streets},
+        "road": {"roads": osm.select_main_roads},
+    }
+
+    junctions, _ = osm.locate_ways(osm_file, selects, ("highway",))
+
+    # Node 3 is the end of the main road 1 and of the residential street 4:
+    # one way of each mode.
+    assert 3 not in junctions["road"]
+    assert 3 not in junctions["street"]
 
 
 def test_load_from_osm_keeps_the_largest_strongly_connected_part(osm_file):
