@@ -109,7 +109,7 @@ jobs:
       - name: Build and validate the world network, if it is not carried over
         run: |
           if [ -f files/world_multimodal.scgraph ]; then echo "carried over"; exit 0; fi
-          uv run python -m scgraph.pipelines.build world_multimodal --cache-dir cache --validate
+          /usr/bin/time -v uv run python -m scgraph.pipelines.build world_multimodal --cache-dir cache --validate
           mkdir -p files
           cp cache/networks/world_multimodal/*.scgraph files/world_multimodal.scgraph
       - uses: actions/upload-artifact@v4
