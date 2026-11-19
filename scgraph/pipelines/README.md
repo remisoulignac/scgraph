@@ -189,6 +189,44 @@ file = build_file("osm_multimodal", region="europe/denmark")  # the file of the 
 roads = GeoGraph.load_from_scgraph(file, modes=["road"])
 ```
 
+## A network derived from a network file
+
+`derive_file` of `derive.py` writes a part of a network file as a new network file, with no
+download. It keeps some of the modes, or the land networks inside a rectangle. `VIEWS` of the
+same module names such parts of `world_multimodal`, for example `world_sea` and `oceania`.
+
+```
+python -m scgraph.pipelines.derive world_multimodal.scgraph oceania derived --validate
+```
+
+The command writes `derived/oceania.scgraph` and prints its path. With
+`--without-shapes`, it writes `derived/oceania.no_shapes.scgraph`: the same network without
+the shapes of its arcs.
+
+The numbers below come from one derivation of `oceania` on 2026-11-19, on Linux, with the C++
+extension. The parent file is the `world_multimodal` of the data release
+`networks-2026.11.19-dev.1` (325.6 MB).
+
+| Step | Nodes | Arcs |
+|---|---|---|
+| the parent file | 3,281,281 | 6,174,775 |
+| select the nodes and cut the graph | 124,937 | 337,401 |
+| keep the components of at least 10 nodes | 124,889 | 337,365 |
+| contract the chains | 121,990 | 331,571 |
+
+- **Select the nodes.** The rectangle of `oceania` cuts the roads, the railways and the rail
+  terminals. The sea lanes, the ports and the airports of the world stay: a route may leave
+  the region by sea or by air.
+- **Assemble again.** `assembly.assemble` removes the small parts that the cut leaves apart: 48
+  nodes here. It then contracts the chains again, so a junction that lost a road is removed.
+  This run contracts 2,899 nodes. Each of them has two neighbours in the parent file.
+
+The derived file is 19.2 MB. Its header records the `content_sha256` of the parent file, the
+modes and the rectangle. With `--validate`, the file is checked against the cases of
+`world_multimodal` whose two ends are inside the rectangle: 16 cases, which all pass.
+
+Where to read more: the header of `derive.py`.
+
 ## A network of your own
 
 Copy the pipeline that is nearest to your need, and change its sources, its select functions or

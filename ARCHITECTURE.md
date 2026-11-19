@@ -48,6 +48,8 @@ The package `scgraph.pipelines` builds networks from their online sources. A pip
 
 The runner, `build.py`, runs a pipeline. `build_file` downloads the sources and calls `build` in a work folder. It writes the network to a `.scgraph` file, with the metadata of the build (pipeline, sources, software) in the header. Then it moves the file into the cache.
 
+`derive.py` writes a part of a network file as a new network file, with no download: some of its modes, or its land networks inside a rectangle (`derive_file`). The header of the derived file records the digest of its parent file.
+
 A build runs steps. The functions of the steps are in `scgraph.pipelines.steps`, in four stages:
 
 * **Stage 1, read the sources (`steps.stage1_extract`)**:
@@ -394,6 +396,7 @@ The header contains top-level structural fields and a nested `metadata` dictiona
 | `metadata.pipeline` | `dict` | The pipeline that built the file: its name, the region, and its `PIPELINE_VERSION`. |
 | `metadata.software` | `dict` | Build environment provenance: `scgraph` version, `backend` (`cpp` or `python`), and host platform (e.g. `linux-x86_64 glibc 2.36` or `macOS 14.5`). |
 | `metadata.sources` | `list[dict]` | Data sources with attribution, licenses, URLs, file digests, and data timestamps. |
+| `metadata.derivation` | `dict` | Only in a file that `scgraph.pipelines.derive` derived from another network file: the `parent_content_sha256`, and the `modes`, the `rectangle` and the `min_component_nodes` of the derivation. |
 
 ---
 

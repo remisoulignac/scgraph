@@ -50,9 +50,11 @@ def _clean_work(work: Path, cache: Path) -> None:
             break
 
 
-def _validate_pipeline(pipeline, name, region, filename):
+def _validate_pipeline(pipeline, name, region, filename, should_check=None):
     """Check the network file against the cases that the pipeline lists for the
     region. Raise a RuntimeError when a case fails. A pipeline without cases passes.
+    With `should_check`, a case is checked only when this function returns true for
+    it.
     """
     validation = getattr(pipeline, "VALIDATION", None)
     if not validation:
@@ -63,6 +65,8 @@ def _validate_pipeline(pipeline, name, region, filename):
     )
 
     cases = load_cases(validation, region=region)
+    if should_check is not None:
+        cases = [case for case in cases if should_check(case)]
     if not cases:
         return
     logger.info("Validating %s against %d case(s)", name, len(cases))

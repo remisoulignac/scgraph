@@ -1,15 +1,18 @@
 name: Build the reference networks
 
-# A data release publishes built network files as assets of a GitHub release.
+# A data release publishes network files as assets of a GitHub release.
 #
 # To make one, push a tag `networks-YYYY.MM.DD` on a commit of `dev`. A development
-# release adds `-dev.N` and is published as a pre-release. Each job below builds and
-# validates one network on a standard runner. The last job creates the release as a
-# draft. A maintainer reads the draft, then publishes it. The files of a published
-# release never change: a correction is a new tag.
+# release adds `-dev.N` and is published as a pre-release. The last job creates the
+# release as a draft. A maintainer reads the draft, then publishes it. The files of a
+# published release never change: a correction is a new tag.
 #
-# A network whose pipeline and sources did not change keeps the file of the previous
-# published data release. That release may be a development release.
+# One network is built from its sources: `world_multimodal`. Every other file is a
+# view of it, derived by `scgraph.pipelines.derive` with no download: some of its
+# modes, or one region. The world network is built again only when the
+# `PIPELINE_VERSION` of its pipeline changes. A new date of the planet file is such a
+# change. Otherwise the release takes the world file of the previous published data
+# release, which may be a development release.
 on:
   push:
     tags:
@@ -22,15 +25,20 @@ permissions:
 concurrency:
   group: ${{ github.ref }}
 
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ github.ref_name }}
+  # jq filter: the tag of the last published data release, or nothing
+  PREVIOUS: >-
+    [.[] | select(.tagName | startswith("networks-")) | select(.isDraft | not)]
+    | sort_by(.publishedAt) | last | .tagName // ""
+
 jobs:
   check:
     name: Check the tag
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GH_REPO: ${{ github.repository }}
-      TAG: ${{ github.ref_name }}
     steps:
       - name: Stop if the tag is misspelled or its release is published
         run: |
@@ -40,29 +48,15 @@ jobs:
           is_draft=$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null || true)
           if [ "$is_draft" = "false" ]; then echo "$TAG is published"; exit 1; fi
 
-  build:
-    name: ${{ matrix.network }}
+  world:
+    name: world_multimodal
     needs: check
     runs-on: ubuntu-24.04
     timeout-minutes: 355 # a job is stopped at 6 hours
-    strategy:
-      fail-fast: false
-      matrix:
-        # The networks of a release. Only this list leaves a network out. Two are
-        # left out because the license of their source does not clearly allow a
-        # shared copy: us_freeway and oak_ridge_maritime. The pipelines that need
-        # a region are left out too: a user builds such a network in a few minutes.
-        network:
-          - marnet
-          - eurostat_marnet
-          - north_america_rail
-          - europe_freeway
-          - europe_rail
-          - world_main_roads
-          - world_main_roads_and_marnet
-          - world_multimodal
     env:
       SCGRAPH_REQUIRE_CPP: "1"
+    outputs:
+      views: ${{ steps.views.outputs.views }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -78,29 +72,86 @@ jobs:
           grep -n 'osm-planet-us-west-2' scgraph/pipelines/steps/stage1_extract/osm.py
       - name: Install scgraph with the C++ extension and osmium
         run: uv sync --extra osm
-      - name: Build and validate
+      - name: Take the world file of the previous release, if this version of the pipeline built it
         run: |
-          uv run python -m scgraph.pipelines.build ${{ matrix.network }} \
-            --cache-dir cache --validate
-          mkdir built
-          cp cache/networks/${{ matrix.network }}/*.scgraph built/${{ matrix.network }}.scgraph
+          mkdir built previous
+          previous=$(gh release list --limit 100 --json tagName,isDraft,publishedAt -q "$PREVIOUS")
+          echo "previous data release: ${previous:-none}"
+          if [ -z "$previous" ]; then exit 0; fi
+          gh release download "$previous" --dir previous --pattern 'world_multimodal.scgraph*' || true
+          gunzip --force previous/*.gz 2>/dev/null || true
+          if [ ! -f previous/world_multimodal.scgraph ]; then exit 0; fi
+          uv run python - <<'PYTHON'
+          import shutil
+          from scgraph import GeoGraph
+          from scgraph.pipelines import world_multimodal
+
+          file = "previous/world_multimodal.scgraph"
+          built_by = GeoGraph.get_scgraph_info(file)["pipeline"]["version"]
+          print(f"pipeline version: {built_by} then, {world_multimodal.PIPELINE_VERSION} now")
+          if built_by == world_multimodal.PIPELINE_VERSION:
+              shutil.move(file, "built/world_multimodal.scgraph")
+          PYTHON
+      - name: Build and validate the world network, if it was not taken
+        run: |
+          if [ -f built/world_multimodal.scgraph ]; then exit 0; fi
+          uv run python -m scgraph.pipelines.build world_multimodal --cache-dir cache --validate
+          cp cache/networks/world_multimodal/*.scgraph built/world_multimodal.scgraph
       - uses: actions/upload-artifact@v4
         with:
-          name: network-${{ matrix.network }}
-          path: built/*.scgraph
+          name: world
+          path: built/world_multimodal.scgraph
+          retention-days: 14
+      # The table of the code names the views. Only this table leaves a view out.
+      - name: List the views
+        id: views
+        run: |
+          uv run python -c "import json; from scgraph.pipelines.derive import VIEWS; print('views=' + json.dumps(list(VIEWS)))" >> "$GITHUB_OUTPUT"
+
+  views:
+    name: ${{ matrix.view }}
+    needs: world
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        view: ${{ fromJSON(needs.world.outputs.views) }}
+    env:
+      SCGRAPH_REQUIRE_CPP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install scgraph with the C++ extension
+        run: uv sync
+      - uses: actions/download-artifact@v4
+        with:
+          name: world
+          path: world
+      # Each view gives two files: with the shapes of its arcs, and without them.
+      # The world view with its shapes is the world file itself, so it is not derived.
+      - name: Derive and validate
+        run: |
+          mkdir derived
+          derive="uv run python -m scgraph.pipelines.derive world/world_multimodal.scgraph ${{ matrix.view }} derived"
+          if [ "${{ matrix.view }}" != world_multimodal ]; then $derive --validate; fi
+          $derive --without-shapes
+      - uses: actions/upload-artifact@v4
+        with:
+          name: view-${{ matrix.view }}
+          path: derived/*.scgraph
           retention-days: 14
 
   assemble:
     name: Create the draft release
-    needs: build # no draft while a network fails
+    needs: views # no draft while a view fails
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GH_REPO: ${{ github.repository }}
-      TAG: ${{ github.ref_name }}
       SCGRAPH_NO_BUILD: "1" # reading a file header needs no C++ extension
     steps:
       - uses: actions/checkout@v4
@@ -114,25 +165,22 @@ jobs:
           if [ "$is_draft" = "true" ]; then gh release delete "$TAG" --yes; fi
       - uses: actions/download-artifact@v4
         with:
-          pattern: network-*
-          path: built
+          path: files
           merge-multiple: true
-      - name: Download the previous data release
+      - name: Download the index of the previous data release
         run: |
-          previous=$(gh release list --limit 100 --json tagName,isDraft,publishedAt \
-            -q '[.[] | select(.tagName | startswith("networks-")) | select(.isDraft | not)]
-                | sort_by(.publishedAt) | last | .tagName // ""')
-          echo "previous data release: ${previous:-none}"
           mkdir previous
-          if [ -n "$previous" ]; then gh release download "$previous" --dir previous; fi
+          previous=$(gh release list --limit 100 --json tagName,isDraft,publishedAt -q "$PREVIOUS")
+          echo "previous data release: ${previous:-none}"
+          if [ -n "$previous" ]; then gh release download "$previous" --dir previous --pattern networks.json; fi
       - name: Assemble the release
         run: |
           uv sync
-          uv run python utils/assemble_networks.py built previous release "$TAG" "$GITHUB_SHA"
+          uv run python utils/assemble_networks.py files previous release "$TAG" "$GITHUB_SHA"
           cat release/notes.md >> "$GITHUB_STEP_SUMMARY"
       - name: Create the draft
         run: |
           case "$TAG" in *-dev.*) kind=--prerelease ;; *) kind= ;; esac
           gh release create "$TAG" --verify-tag --draft --latest=false $kind \
             --title "$TAG" --notes-file release/notes.md \
-            release/*.scgraph release/networks.json
+            release/*.scgraph.gz release/networks.json
